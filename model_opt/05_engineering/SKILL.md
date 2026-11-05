@@ -34,7 +34,7 @@ main 分支（稳定版本，不直接修改）
 - **提交前必须完成以下步骤**（缺一不可）：
   1. 全量精度验证通过（Level 2，与原始 baseline 对比）
   2. Profiling 确认有收益（重新采集，对比优化前后数据）
-  3. evidence_db 案例已按 [schema](../06_evidence_db/schema.md) 记录到项目工作目录的 `evidence_db/` 下
+  3. evidence_db 已记录并通过文件校验
   4. 用户确认提交（展示总结 + evidence_db 路径，等待用户同意）
 - 每批优化一个 commit，不要多批合并
 - 实验性尝试前确认有干净的回退点（以当前工作分支 HEAD 为基点）

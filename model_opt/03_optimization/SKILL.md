@@ -44,7 +44,7 @@ subagent 零上下文启动，prompt 必须注入：
 
 1. **任务与返回条件**：方案内容、对应问题点、验证要求（Level 1 精度 + A/B benchmark）。返回条件只有三种——已实施（附验证结果）/ 已放弃（附「方向放弃标准（分级）」对应级别完整证据）/ 已回退（附原因），不允许浅尝辄止：框架实现失败须再尝试自定义实现（Level 2+ 强制），单次失败须先归因再决定下一步
 2. **必读文件**：按方案类型给路径、要求实施前先读——替换维度 → [npu_operator_catalog.yaml](references/npu_operator_catalog.yaml)；等价替换类方案 → [equivalence_verification.md](references/equivalence_verification.md)；图编译 → [compilation_tools.md](references/compilation_tools.md)；任何方案 → [npu_checklist.md](references/npu_checklist.md)；四维度手段 → 对应维度 reference
-3. **死路清单**：evidence_db `platform_findings` 中前提仍成立的条目 + 本 session 已确认失败的路径（各附失败原因与成立前提）。清单内路径禁止重试，唯一例外是任务前提已实质变化（图结构 / 环境变量 / dtype / 版本），重验须说明前提差异
+3. **死路清单**：本 session 已确认失败的路径（各附失败原因与成立前提）。清单内路径禁止重试，唯一例外是任务前提已实质变化（图结构 / 环境变量 / dtype / 版本），重验须说明前提差异
 
 方案内的多轮尝试（换实现 / 调参数 / 换 dtype / 换输入顺序）在 subagent 独立上下文中穷尽，不挤占主线。相互独立的方案并行 spawn，有依赖的（方案 B 依赖 A 的产物）按依赖顺序。
 

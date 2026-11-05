@@ -32,7 +32,7 @@ npu-smi info        # 复查确认显存/算力已释放
 - **专注模型的多卡推理切分**：让模型在多卡上正确运行，每卡承担合理份额的计算与显存
 - **病因覆盖（对账原则）**：进入本轨道的触发原因（哪个阶段 OOM / 用户的延迟或吞吐目标）必须被方案的切分对象**显式覆盖**——切了不治病的维度（如激活超限发生在主干，却只切独立样本维），触发问题原样留给单卡，方案可行性被外包给一个未立项的"单卡先放下"前提。方案确认时必须对账（见 analysis_workflow「第零步：病因对账」）
 - **禁止修改模型架构**：切分只改变计算的分布方式，不改变模型的数学语义和结构
-- **三角度论证**：切分方案必须从数学正确性、完备性、系统可行性三个角度论证；张量分布约定表在方案确认后落盘为工作契约（供实施/验证对照），验证通过后随切分案例记录到 [evidence_db](../06_evidence_db/schema.md)（`parallel_splitting` 字段）
+- **三角度论证**：切分方案必须从数学正确性、完备性、系统可行性三个角度论证；张量分布约定表在方案确认后落盘为工作契约（供实施/验证对照），验证通过后随切分案例记录到 [evidence_db](../06_evidence_db/schema.md) 的独立文件 `evidence_db/splitting.yaml`（`parallel_splitting` 节）
 
 
 ## 全流程
@@ -69,12 +69,11 @@ npu-smi info        # 复查确认显存/算力已释放
  ★ 提交审核（`ask_user_question`：展示 verify_report.json（overall + 各 tier 结果）+ 性能收益 → 确认提交）
    ↓
 记录与回归
-   第六步  记录 evidence_db 切分案例（方案 + 估算 + 等价性论证 + 验证结果 + 已知坑；与优化案例分立，后者 depends_on 本案例）
+   第六步  记录 evidence_db 切分案例——独立文件 `evidence_db/splitting.yaml`（分诊信号与分析线 + 方案 + 估算 + 等价性论证 + 验证结果 + 已知坑 + 各阶段成本；与轮次优化案例分立，后续优化案例在其 notes 引用本案例 id）
           → 回归 Phase 0 完成适配精度验证 → Phase 1 采集并行基线 → 进入 Phase 2
 ```
 **注意**：第五步要端到端测试，需选一组切分前可单卡跑通的配置作为锚点；权重超单卡、拿不到单卡 baseline 时的替代方案（缩小输入/缩小模型/逐层对比）与 verify_split.py 完整操作流程（含必填的 `--split-type`）见 implementation_guide「正确性验证」。
 
-**错误回退**：第三步估算否决候选→回第二步换切分维度 | 第三步把**所有能治病因的候选**（如 SP/TP）否决→结论不是退而求其次选一个治不了病的切法，而是"病因不可切分"：单卡内存工程在 Phase 3 立项（见 03_optimization「内存工程」），本轨道仅服务速度目标且 ★方案确认须声明该边界；否决依据为理论估算时先实测校准再下结论 | ★方案确认被否→回分析调整 | 第四步冒烟失败→按 implementation_guide「调试排查」处理，方案性问题回第二步 | 实施期 **OOM 逐点转移熔断**（修一处挪一处，累计 ≥3 轮）→ 停止挤气球：先复审分诊归因（回读全部 OOM traceback 建崩溃位置图谱，与病因清单比对——位置不符 = 初始内存模型错误，先修模型），再重估峰值模型（分配器碎片 / 隐藏常驻缓存 / 算子 workspace），理论余量仍 <10% 则回退方案重选 | 第五步验证未过→按 implementation_guide「验证未过处置」路由：最小输入未过=实施错误，回第四步；仅真实样本超档→消融定界（fp32 通信 / fp32 行并行 GEMM / 双跑一致性），定位单点则修复重验；三项均无法消除、偏差符合形状级噪声预期（见 analysis_workflow「等价性论证」）且方向一致→**例外审批**：用户确认 + evidence_db 留痕（复现条件、容差边界、消融证据），禁止无依据放宽容差后重跑"通过"
 
 ## 调试与排查
 
@@ -91,6 +90,6 @@ npu-smi info        # 复查确认显存/算力已释放
 | 通信基建 | [scripts/comm_primitives.py](scripts/comm_primitives.py) / [comm_recipes.py](scripts/comm_recipes.py) / [comm_self_test.py](scripts/comm_self_test.py) | 基座整文件 copy；切分组合函数按需取用；环境自检原地运行（`--timing` 兼作通信参数校准，供 spec hardware 覆盖） |
 | 估算脚本 | [scripts/estimate_split.py](scripts/estimate_split.py) | 第三步显存/通信/收益估算：填 spec（含实测 α；计算耗时由脚本 FLOPs 解析估算）→ 原地运行（无需 copy）→ 读报告排序与推荐结论 |
 | 验证模板 | [scripts/verify_split.py](scripts/verify_split.py) | 切分前后输出对比（分层 tolerance + bit-exact debug + verify_report.json） |
-| 案例记录 | [06_evidence_db/schema.md](../06_evidence_db/schema.md) | `parallel_splitting` 字段定义 |
+| 案例记录 | [06_evidence_db/schema.md](../06_evidence_db/schema.md) | 切分案例独立文件 `splitting.yaml`（含 `parallel_splitting` 节定义） |
 
 **场景提问**：接到多卡请求后用 `ask_user_question` 按优先级问（max 4 题/次）：① 场景/指标/序列规模与负载形态 → ② 模型架构/规模 → ③ 硬件拓扑/HBM。已明确的维度跳过。

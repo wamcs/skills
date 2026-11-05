@@ -153,11 +153,11 @@ tolerance 未通过时，用最小输入做 bit-exact 逐元素对比定位差�
 | Tier 1 冒烟 / 2a（最小输入） | 实施错误（通信配对、shape、分布式逻辑） | 对照 `tensor_distribution_table` 排查，回第四步修复 |
 | 仅 Tier 2b（真实样本）超档 | 需消融定界，区分三类根因 | 依次执行：① fp32 通信重跑（排除归约顺序）② fp32 行并行 GEMM 重跑（排除计算顺序）③ 双跑 bit 一致性检查（暴露非确定性实现，如通信库归约顺序不固定） |
 | 消融定位到单点 | 可修实现问题 | 修复后重跑全部分层 |
-| 三项均无法消除、偏差符合形状级噪声预期（见 [analysis_workflow.md](analysis_workflow.md) 等价性论证）、方向一致（top1 / cosine 正常） | 切分固有数值噪声 | **例外审批**：`ask_user_question` 向用户说明消融证据与偏差量级 → 用户确认 → evidence_db 留痕（复现条件、容差边界、消融证据）→ 视为通过；禁止无依据放宽容差后重跑"通过" |
+| 三项均无法消除、偏差符合形状级噪声预期（见 [analysis_workflow.md](analysis_workflow.md) 等价性论证）、方向一致（top1 / cosine 正常） | 切分固有数值噪声 | **例外审批**：`ask_user_question` 向用户说明消融证据与偏差量级 → 用户确认 → evidence_db 留痕（复现条件、容差边界、消融证据，记入 splitting.yaml 的 `numeric_sensitivity` 与 `known_pitfalls`）→ 视为通过；禁止无依据放宽容差后重跑"通过" |
 
 ## 记录与回归（验证通过后）
 
-★ 提交确认通过后，将完整案例记录到 evidence_db——分析阶段的内存时间线、切分方案与张量分布表、定量估算与等价性论证、验证结果（verify_report 摘要 + 缩配参数若有）、known_pitfalls。Schema 见 [06_evidence_db/schema.md](../../06_evidence_db/schema.md) 的 `parallel_splitting` 顶层字段——切分案例与优化案例分立记录，后续优化案例用 `depends_on` 指向本案例。
+★ 提交确认通过后，将完整案例记录到 evidence_db 的独立文件 `evidence_db/splitting.yaml`——分诊信号（phenomenon，来自冒烟/OOM traceback 与源码结构）、分诊分析线（analysis_path）、容量根因（root_cause）、切分方案与张量分布表、定量估算与等价性论证、验证结果（verify_report 摘要 + 缩配参数若有）、known_pitfalls、各阶段成本（costs）。Schema 见 [06_evidence_db/schema.md](../../06_evidence_db/schema.md)「切分案例文件 splitting.yaml」——切分案例与轮次优化案例分立记录，后续优化案例在其 `notes` 引用本案例 id。记录后运行 `06_evidence_db/scripts/validate_evidence.py <workspace>/evidence_db` 校验（含 splitting.yaml 结构与链路），零退出再提交。
 
 记录完成后回归主流程：Phase 0 完成适配精度验证（golden 对齐，多卡配置下执行）→ Phase 1 采集并行基线（L0/wall-clock；多卡采集适配见 [01_preparation 的 profiling_collection](../../01_preparation/references/profiling_collection.md)「多卡并行推理采集」）→ 进入 Phase 2 瓶颈分析。
 
