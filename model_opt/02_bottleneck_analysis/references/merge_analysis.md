@@ -20,15 +20,19 @@ Line B 根因追踪依赖的桥（Call Stack 等）可能断裂："(no stack)"�
 
 ## candidates.md 结构
 
+> 三节缺任一节 = 轮次无效，`validate_analysis.py` 按 `## 2. 信号追踪表` / `## 3. 排除与待定项` 标记词机检拒收。
+
 ```
 # 第 N 轮候选清单（问题点，Phase 3 方案设计输入）
+> 头部声明: 本轮 L0/L1 数据源（目录+时间戳，N≥2 时须晚于上轮最后 commit）| 上轮收益确认摘要 | L0/L1 交叉验证结论
 ## 1. 候选清单（按反事实收益上限降序）
    id | 来源（LA-xx + LB-信号；双来源标注） | 问题 + 位置 | 结构根因（Line A） | 浪费类别 | 反事实收益上限
 ## 2. 信号追踪表
    发现来源 | 发现内容 | 使用的桥梁 | 源码位置 | 根因 | 候选方案 / 排除依据
    范围：run_analysis 报告的全部 DEFINITE/WARNING 信号 + E 节 >10% total host time 的调用链层
 ## 3. 排除与待定项
-   冷路径排除（附依据）、profiling 盲区候选（收益不确定标注）、未量化项
+   冷路径排除（附依据）、profiling 盲区候选（收益不确定标注）、未量化项、
+   上轮候选处置表（N≥2 必填: 复验通过/条件失效/已实施，逐条附数据——见 02 SKILL「轮次开局协议」）
 ```
 
 **信号追踪表是完整性依据**：范围内每条必须有候选或附依据的排除，未完成不得进入 Phase 3 方案设计（门禁见 [execution_protocol.md](../../references/execution_protocol.md)）。完整性由两个数据锚定的机制保证——本表（profiling 侧：所有显著现象都有信号）+ Line A 的热路径事实全覆盖与根问题（源码侧）。十类浪费不设状态网格，仅作为候选的归类（`waste_class`）与收益上限度量依据（[waste_taxonomy.md](waste_taxonomy.md)）。

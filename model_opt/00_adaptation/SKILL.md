@@ -70,6 +70,8 @@ config.json / preprocessor_config.json  (最权威)
 
 优先使用官方封装 (`AutoImageProcessor`, `AutoTokenizer`, `Pipeline`)。手动实现时逐项交叉验证。
 
+特别注意适配过程中要和原版实现保持一致，禁止随意改动模型结构、参数、推理逻辑、backend参数等。
+
 **设备适配写法**（最小改动原则的落地）：
 
 1. **import 顺序**：先设环境变量（完整清单见 [environment_reference.md](references/environment_reference.md) §3），再 `import torch_npu`

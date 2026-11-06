@@ -21,9 +21,9 @@ npu-smi info        # 复查确认显存/算力已释放
 无论从哪个子技能进入，执行前必须：
 0. 适配状态判定：找到既有推理脚本现场跑一遍——跑通则跳过 Phase 0 直接进入 Phase 1；跑不通或无脚本则进入 Phase 0（[00_adaptation](00_adaptation/SKILL.md)）
 1. 确认当前在哪个 Phase（参见下方「全流程」）
-2. 确认上一个 Phase 的产出已完成
+2. 确认上一个 Phase 的产出已完成（以各阶段「GATE 退出条件」清单为准，禁止凭印象判定）
 3. 按全流程顺序执行，不跳步
-4. 进入每个phase后，所有reference文件需要按需加载，确认已读/跳过状态，并在 evidence_db 中记录
+4. 进入每个phase后，所有reference文件需要按需加载，确认已读/跳过状态
 
 ## 核心原则
 
@@ -67,6 +67,7 @@ Phase 0  模型适配（00_adaptation；已适配模型经启动协议第 0 步�
 Phase 1  基线准备
          ├─ 生成 evidence_db/metadata.yaml（模型/环境/基线元信息，模板见 06_evidence_db，全轮共用）
          └─ 采集 L0 基线 + wall-clock benchmark（全程仅一次，作为收益判定基准）
+         └─ git 提交一版，作为适配完成的阶段性提交
    ↓
 ┌─────────────────── 一个「优化阶段」（可迭代多轮）───────────────────┐
 │ Phase 2  瓶颈分析                                                  │
@@ -97,11 +98,11 @@ Phase 5  工程化提交（git commit + evidence_db 记录）
 > - **wall-clock**：Phase 1 采一次作基线；每个优化阶段 Phase 4 再采一次做收益确认（无 profiler 开销，是收益判定的可靠依据）。
 > - **L0**：Phase 1 采一次作基线；每个优化阶段 Phase 4 采一次做收益比对和下一轮 Phase 2 的 L0/L1 交叉验证。
 > - **L1**：每个优化阶段的 Phase 2 开始前采集，交分析模块定位优化点（迭代回环时每轮都重新采）。
-> 三者必须覆盖相同代码范围。定义与模板见 [profiling_collection.md](01_preparation/references/profiling_collection.md)。
+> 三种性能测量必须覆盖相同代码范围。定义与模板见 [profiling_collection.md](01_preparation/references/profiling_collection.md)。
 
 ## 执行协议（agent 程序约束）
 
-三个用户确认节点控制迭代流程，若用户声明自动化执行（无需人工确认），门禁节点仍然存在，agent 需在内部做自动化判定。详细门禁规则必读，必须遵守 [execution_protocol.md](references/execution_protocol.md)：
+三个用户确认节点控制迭代流程。**自动化豁免仅限"用户交互"，不豁免任何门禁产物与校验器运行，禁止以"自查/自认为完整"替代校验器输出**；判定所依据的门禁定义必须来自已读的 execution_protocol.md，未读不得判定。详细规则见 [execution_protocol.md](references/execution_protocol.md)：
 
 - **★A 方案审核**（Phase 3 内：方案设计 → 实施之间）：Phase 2 产出问题点清单（candidates.md），Phase 3 对照**每个问题点**设计方案（无方案的须解释）并落盘 solutions.md（之后进行文件校验），经用户确认后逐条实施。前置：candidates.md 完整（信号追踪与疑点去向闭环）。
 - **★B 提交审核**（Phase 4→5）：对照 ★A 确认的方案清单逐条交代实施结果（已实施/已放弃/已回退，附效果与原因），evidence_db 已记录且通过文件校验，才允许 git commit。

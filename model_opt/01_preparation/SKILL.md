@@ -94,3 +94,10 @@ python <skill_path>/01_preparation/scripts/validate_profiling_env.py --device np
 ### 确定性条件
 
 推理：`model.eval()` + `torch.no_grad()` + 固定输入 + 关闭随机性。详见 04_accuracy_assurance「一、前提条件」。
+
+## 退出条件（缺一不得进入 Phase 2）
+
+1. `validate_profiling_env.py` 退出码 0（环境预检）
+2. `baseline/` 下 wall-clock json（≥20 次中位）与 L0 profiling 目录已落盘，`profiling/latest*` 软链有效
+3. `compare_precision.py --mode baseline --runs 3` **已实际运行**且 `variance.json` 生成——只建脚本不采基线不算完成（精度门禁是后续每轮优化的闸门，闸门本体必须在 Phase 1 建立）
+4. `evidence_db/metadata.yaml` 四节完整（`validate_evidence.py` 校验退出码 0），其中 `baselines.performance_ms` 已回填实际测量值
