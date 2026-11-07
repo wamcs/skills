@@ -125,9 +125,30 @@ def attempts_of(data):
     return atts if isinstance(atts, list) else []
 
 
-def verdict_of(att):
-    perf = att.get("performance_result")
-    return perf.get("verdict") if isinstance(perf, dict) else None
+MEAS_KIND_LABELS = {"incremental": "增量", "isolated": "隔离A/B",
+                    "in_process_paired": "进程内配对", "component_probe": "子环节"}
+
+
+def perf_records_of(att):
+    """attempt 性能记录列表: performance_results (v2 列表) 或旧格式 performance_result 单条。"""
+    prs = att.get("performance_results")
+    if isinstance(prs, list):
+        return [r for r in prs if isinstance(r, dict)]
+    pr = att.get("performance_result")
+    return [pr] if isinstance(pr, dict) else []
+
+
+def attempt_verdict_of(att, records=None):
+    """attempt 判定: attempt 层 verdict 优先, 其次记录内 verdict (取首个)。"""
+    if records is None:
+        records = perf_records_of(att)
+    v = att.get("verdict")
+    if v is not None:
+        return str(v)
+    for r in records:
+        if r.get("verdict") is not None:
+            return str(r.get("verdict"))
+    return None
 
 
 def id_date(data):
@@ -178,14 +199,26 @@ def total_gain_ms(baseline, rounds):
     return baseline - float(last)
 
 
-def build_attempt(att, tg):
-    """单优化点记录: 直读数值字段; 贡献率只对 accepted 计算。"""
-    perf = att.get("performance_result") or {}
-    before_ms = perf.get("before_ms") if is_num(perf.get("before_ms")) else None
-    after_ms = perf.get("after_ms") if is_num(perf.get("after_ms")) else None
-    gain = (before_ms - after_ms) if (before_ms is not None and after_ms is not None) else None
-    verdict = verdict_of(att)
-    contributable = verdict == "accepted"
+def build_attempt(att):
+    """单优化点记录: 性能记录列表化 (regime/口径标签)。
+    贡献率不在此算——按 regime 分账, 由 _regime_accounts 统一回填 (仅 accepted ∧ incremental)。"""
+    records_raw = perf_records_of(att)
+    verdict = attempt_verdict_of(att, records_raw)
+    records = []
+    for r in records_raw:
+        b = r.get("before_ms") if is_num(r.get("before_ms")) else None
+        a = r.get("after_ms") if is_num(r.get("after_ms")) else None
+        records.append({
+            "regime": r.get("regime"),
+            "measurement_kind": r.get("measurement_kind"),
+            "metric": r.get("metric"),
+            "baseline_ref": r.get("baseline_ref"),
+            "before_ms": b, "after_ms": a,
+            "gain_ms": (b - a) if (b is not None and a is not None) else None,
+            "contribution_rate": None,
+        })
+    primary = next((r for r in records if r["before_ms"] is not None),
+                   records[0] if records else None)
     c = att.get("costs") or {}
     in_c = c.get("input_cost") if is_num(c.get("input_cost")) else None
     out_c = c.get("output_cost") if is_num(c.get("output_cost")) else None
@@ -195,13 +228,86 @@ def build_attempt(att, tg):
         "attempt_index": None, "description": att.get("description"),
         "dimensions": dim if isinstance(dim, list) else ([dim] if dim else []),
         "verdict": verdict,
-        "before_ms": before_ms, "after_ms": after_ms,
-        "gain_ms": gain,
-        "contribution_rate": (gain / tg) if (gain is not None and tg and contributable) else None,
+        "before_ms": primary["before_ms"] if primary else None,
+        "after_ms": primary["after_ms"] if primary else None,
+        "gain_ms": primary["gain_ms"] if primary else None,
+        "contribution_rate": None,
+        "records": records,
         "verification_result": (att.get("equivalence_verification") or {}).get("result"),
         "failure_reason": att.get("failure_reason"),
         "input_cost": in_c, "output_cost": out_c, "time_hours": hours,
     }
+
+
+def _regime_baseline_map(meta, round_list):
+    """各 regime 的基线锚: metadata.performance_regimes 优先 (单点真相),
+    回退到案例 regimes 表首次出现的 before_ms。"""
+    anchors = {}
+    if isinstance(meta, dict):
+        pr = (meta.get("baselines") or {}).get("performance_regimes")
+        if isinstance(pr, list):
+            for e in pr:
+                if isinstance(e, dict) and e.get("name") and is_num(e.get("baseline_ms")):
+                    anchors[str(e["name"])] = float(e["baseline_ms"])
+    for r in round_list:
+        for rg in (r.get("regimes") or []):
+            if isinstance(rg, dict) and rg.get("name"):
+                name = str(rg["name"])
+                if name not in anchors and is_num(rg.get("before_ms")):
+                    anchors[name] = float(rg["before_ms"])
+    return anchors
+
+
+def _regime_accounts(round_list, baseline_map):
+    """按 regime 分账 (schema 填写原则 10):
+    已归因 = accepted ∧ measurement_kind=incremental ∧ regime 一致 的记录增益和;
+    分母 = 该 regime 总收益 (基线锚 - 末轮 after)。并回填每条 incremental 记录的 contribution_rate。"""
+    accounts, order = {}, []
+    for r in round_list:
+        for rg in (r.get("regimes") or []):
+            if not (isinstance(rg, dict) and rg.get("name")):
+                continue
+            name = str(rg["name"])
+            if name not in accounts:
+                accounts[name] = {"name": name, "role": rg.get("role"),
+                                  "baseline_ms": baseline_map.get(name, rg.get("before_ms")),
+                                  "final_ms": rg.get("after_ms"),
+                                  "note": rg.get("note"),
+                                  "attributed_ms": 0.0, "attributed_count": 0,
+                                  "total_gain_ms": None, "attributed_rate": None}
+                order.append(name)
+            else:
+                if is_num(rg.get("after_ms")):
+                    accounts[name]["final_ms"] = rg.get("after_ms")
+                if rg.get("note"):
+                    accounts[name]["note"] = rg.get("note")
+    for r in round_list:
+        for a in r["attempts"]:
+            if a["verdict"] != "accepted":
+                continue
+            for rec in a["records"]:
+                if rec["measurement_kind"] != "incremental" or rec["gain_ms"] is None:
+                    continue
+                if rec["regime"] not in accounts:
+                    continue
+                accounts[rec["regime"]]["attributed_ms"] += rec["gain_ms"]
+                accounts[rec["regime"]]["attributed_count"] += 1
+    for name in order:
+        acc = accounts[name]
+        if is_num(acc["baseline_ms"]) and is_num(acc["final_ms"]):
+            acc["total_gain_ms"] = float(acc["baseline_ms"]) - float(acc["final_ms"])
+            if acc["total_gain_ms"]:
+                acc["attributed_rate"] = acc["attributed_ms"] / acc["total_gain_ms"]
+    for r in round_list:
+        for a in r["attempts"]:
+            for rec in a["records"]:
+                if rec["measurement_kind"] == "incremental" and rec["regime"] in accounts \
+                        and rec["gain_ms"] is not None:
+                    acc = accounts[rec["regime"]]
+                    if acc["total_gain_ms"]:
+                        rec["contribution_rate"] = rec["gain_ms"] / acc["total_gain_ms"]
+            a["contribution_rate"] = a["records"][0].get("contribution_rate") if a["records"] else None
+    return accounts, order
 
 
 def build_summary(meta, rounds, splitting, problems):
@@ -209,23 +315,22 @@ def build_summary(meta, rounds, splitting, problems):
     baseline = baseline_ms(meta, rounds)
     tg = total_gain_ms(baseline, rounds)
     notes = list(problems) + cost_consistency(rounds)
-    round_list, gains_sum = [], 0.0
+    round_list = []
     counts = {"accepted": 0, "rejected": 0, "partial": 0}
     grand = [0.0, 0.0, 0.0]
     stage_sum = {s: [0.0, 0.0, 0.0] for s in COST_SECTIONS}
     for n, d in rounds:
         fs = d.get("final_state") or {}
+        regimes = fs.get("regimes") if isinstance(fs.get("regimes"), list) else None
         attempts = []
         for i, att in enumerate(attempts_of(d), 1):
             if not isinstance(att, dict):
                 continue
-            rec = build_attempt(att, tg)
+            rec = build_attempt(att)
             rec["attempt_index"] = i
             attempts.append(rec)
             if rec["verdict"] in counts:
                 counts[rec["verdict"]] += 1
-            if rec["contribution_rate"] is not None:
-                gains_sum += rec["gain_ms"]
         c = case_costs(d)
         for sec in COST_SECTIONS:
             if c[sec]:
@@ -238,6 +343,7 @@ def build_summary(meta, rounds, splitting, problems):
         round_list.append({
             "round": n, "case_id": d.get("id"), "date": id_date(d),
             "end_to_end_before_ms": nb, "end_to_end_after_ms": na,
+            "regimes": regimes,
             "round_speedup": (nb / na) if (nb and na) else None,
             "counts": {"attempts": len(attempts),
                        "accepted": sum(1 for a in attempts if a["verdict"] == "accepted"),
@@ -252,6 +358,15 @@ def build_summary(meta, rounds, splitting, problems):
     for r in round_list:
         r["cumulative_speedup"] = (baseline / r["end_to_end_after_ms"]) \
             if (baseline and r["end_to_end_after_ms"]) else None
+    # v2: 按 regime 分账 (基线锚 = metadata.performance_regimes 优先, 回退案例首次 before)
+    baseline_map = _regime_baseline_map(meta, round_list)
+    regime_accounts, regime_order = _regime_accounts(round_list, baseline_map)
+    gains_sum = 0.0
+    for r in round_list:
+        for a in r["attempts"]:
+            if a["verdict"] == "accepted":
+                gains_sum += sum(rec["gain_ms"] for rec in a["records"]
+                                 if rec["gain_ms"] is not None)
     if rounds:
         last_after = round_list[-1]["end_to_end_after_ms"]
         e2e = {"baseline_ms": baseline,
@@ -267,6 +382,8 @@ def build_summary(meta, rounds, splitting, problems):
         "generated": date.today().isoformat(),
         "metadata": meta,
         "rounds": round_list,
+        "regime_order": regime_order,
+        "regime_accounts": regime_accounts,
         "aggregate": {
             "end_to_end": e2e,
             "counts": dict(counts, rounds=len(rounds), attempts=sum(counts.values())),
@@ -302,9 +419,39 @@ def render_markdown(summary):
         block = meta.get(section)
         block = block if isinstance(block, dict) else {}
         for f in fields:
-            out.append("| %s | %s |" % (META_LABELS[(section, f)],
-                                       str(block.get(f) or "—").replace("|", "\\|")))
+            val = block.get(f)
+            if f == "accuracy" and isinstance(val, dict):
+                for k, label in (("golden", "精度基线·golden 来源"),
+                                 ("method", "精度基线·对齐方法"),
+                                 ("coverage", "精度基线·覆盖范围"),
+                                 ("result", "精度基线·结论")):
+                    out.append("| %s | %s |" % (label, str(val.get(k) or "—").replace("|", "\\|")))
+            else:
+                out.append("| %s | %s |" % (META_LABELS[(section, f)],
+                                           str(val or "—").replace("|", "\\|")))
     out.append("")
+
+    # v2: 性能 regime 清单 (工作负载 + 各 regime 基线)
+    td = meta.get("test_data") if isinstance(meta.get("test_data"), dict) else {}
+    meta_regs = td.get("regimes") if isinstance(td.get("regimes"), list) else None
+    if meta_regs:
+        bl = meta.get("baselines") if isinstance(meta.get("baselines"), dict) else {}
+        pr = bl.get("performance_regimes") if isinstance(bl.get("performance_regimes"), list) else []
+        bl_map = {str(e.get("name")): e.get("baseline_ms")
+                  for e in pr if isinstance(e, dict) and e.get("name")}
+        out.append("**性能 Regime 清单**(每个 regime 是一类真实工作负载):")
+        out.append("")
+        out.append("| Regime | 角色 | 工作负载 | 基线 (ms) |")
+        out.append("|---|---|---|---|")
+        for rg in meta_regs:
+            if not isinstance(rg, dict):
+                continue
+            name = str(rg.get("name") or "—")
+            out.append("| %s | %s | %s | %s |"
+                       % (name, rg.get("role") or "—",
+                          str(rg.get("workload") or "—").replace("|", "\\|"),
+                          fmt(bl_map.get(name))))
+        out.append("")
 
     cnt, e2e = agg["counts"], agg["end_to_end"]
     out.append("## 2. 优化总览")
@@ -334,30 +481,73 @@ def render_markdown(summary):
                       sp, csp))
     out.append("")
 
+    # v2: 各 Regime 表现 (基线锚 → 末轮终态)
+    if summary.get("regime_order"):
+        out.append("### 各 Regime 表现")
+        out.append("")
+        out.append("| Regime | 角色 | 基线 → 末轮 (ms) | 加速比 | 备注 |")
+        out.append("|---|---|---|---|---|")
+        for name in summary["regime_order"]:
+            acc = summary["regime_accounts"][name]
+            b, f = acc.get("baseline_ms"), acc.get("final_ms")
+            sp_r = "%.2fx" % (float(b) / float(f)) \
+                if (is_num(b) and is_num(f) and float(f)) else "—"
+            out.append("| %s | %s | %s → %s | %s | %s |"
+                       % (name, acc.get("role") or "—", fmt(b), fmt(f), sp_r,
+                          str(acc.get("note") or "—").replace("|", "\\|")))
+        out.append("")
+
     out.append("## 3. 优化点明细")
     out.append("")
     for r in summary["rounds"]:
         out.append("### Round %d (%s)" % (r["round"], r["date"] or "—"))
         out.append("")
-        out.append("| # | 优化点 | 维度 | 判定 | 单独收益 (before_ms → after_ms) | 收益 Δ | 贡献率 | 验证 | 成本 (M in / M out / h) | 失败原因 |")
+        out.append("| # | 优化点 | 维度 | 判定 | 收益记录 (before → after [口径/regime]) | 收益 Δ | 贡献率 (regime) | 验证 | 成本 (M in / M out / h) | 失败原因 |")
         out.append("|---|---|---|---|---|---|---|---|---|---|")
         for a in r["attempts"]:
             dim_s = ", ".join(str(x) for x in a["dimensions"])
-            contrib = ("%.1f%%" % (a["contribution_rate"] * 100)
-                       if a["contribution_rate"] is not None else "—")
+            rec_parts = []
+            for rec in a["records"]:
+                seg = "%s → %s" % (fmt(rec["before_ms"]), fmt(rec["after_ms"]))
+                kind = rec.get("measurement_kind")
+                label = MEAS_KIND_LABELS.get(kind, "口径未标") if kind else "口径未标"
+                rec_parts.append("%s [%s%s]" % (seg, label,
+                                                "/" + str(rec["regime"]) if rec.get("regime") else ""))
+            contrib_parts = []
+            for rec in a["records"]:
+                if rec.get("contribution_rate") is not None:
+                    contrib_parts.append("%s %.1f%%" % (rec.get("regime") or "mainstream",
+                                                        rec["contribution_rate"] * 100))
             cost_s = " / ".join(fmt(a[k]) for k in ("input_cost", "output_cost", "time_hours"))
-            out.append("| %d | %s | %s | %s | %s → %s | %s | %s | %s | %s | %s |"
+            out.append("| %d | %s | %s | %s | %s | %s | %s | %s | %s | %s |"
                        % (a["attempt_index"],
                           str(a["description"] or "—").replace("\n", " "),
                           dim_s or "—", a["verdict"] or "—",
-                          fmt(a["before_ms"]), fmt(a["after_ms"]),
-                          fmt(a["gain_ms"], "ms"), contrib,
+                          "; ".join(rec_parts) or "—",
+                          fmt(a["gain_ms"], "ms"),
+                          "; ".join(contrib_parts) or "—",
                           a["verification_result"] or "—", cost_s,
                           str(a["failure_reason"] or "—").replace("\n", " ")))
         out.append("")
-    if e2e["gain_ms"]:
+    if summary.get("regime_order"):
+        out.append("> 收益归因(按 regime 分账, 仅统计 accepted 且口径=增量的记录; "
+                   "隔离 A/B / 进程内配对 / 子环节 / 交互效应 / 环境漂移不计入, 见明细):")
+        for name in summary["regime_order"]:
+            acc = summary["regime_accounts"][name]
+            if not acc.get("total_gain_ms"):
+                continue
+            rate = (acc.get("attributed_rate") or 0.0) * 100
+            flag = ""
+            if rate > 100:
+                flag = "  [!] 已归因超 100%——通常为基线与增量测量间存在环境漂移或回退-修复往返"
+            out.append("> - %s: 已归因 %s / %s ms (%.1f%%)%s"
+                       % (name, fmt(acc["attributed_ms"]), fmt(acc["total_gain_ms"]),
+                          rate, flag))
+        out.append("")
+    elif e2e["gain_ms"]:
         out.append("> 贡献率合计: **%.1f%%** (总收益 %s ms; 仅统计 accepted)——"
-                   "偏离 100%% 的部分来自优化点间交互效应与各点单独 A/B 的口径差"
+                   "偏离 100%% 的部分来自优化点间交互效应与各点单独 A/B 的口径差。"
+                   "(旧格式数据: 迁移到 performance_results + regimes 后按 regime 分账)"
                    % (agg["attempts_gain_sum"] / e2e["gain_ms"] * 100, fmt(e2e["gain_ms"])))
         out.append("")
 

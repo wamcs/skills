@@ -83,15 +83,25 @@
               threshold: <string> # 如 ">= 0.9999" 或 "< 1e-4"
               value: <string>     # 实际值,如 "0.99999" 或 "3.2e-7"
           result: <string>  # 验证结论(通过/失败,可用文字补充细节)
-        performance_result:
-          metric: <string>  # 测量口径说明(benchmark 脚本/次数/中位数等)
-          baseline_ref: <string, optional>
-            # before 的参照对象,如 "raw model (无优化)" / "上一轮优化后" / "L0 基线"
-          before_ms: <float>  # 该优化点单独 A/B 的 before,毫秒数值(单位固定 ms,非自由文本)
-          after_ms: <float>   # 同口径 after,毫秒数值;accepted 必填且 **<= before_ms**
-                               # (after > before = 性能回退, 校验直接打回);rejected 因精度
-                               # 门禁先失败未获 A/B 时可省略
-          verdict: <string>   # accepted / rejected / partial
+        verdict: <string>   # 本优化点的判定: accepted / rejected / partial (attempt 层, v2 推荐位置)
+                             # 旧格式: 判定写在单条 performance_result.verdict 内, 仍被接受
+        performance_results:  # 性能记录列表 (v2)——一个优化点在多个 regime 的收益各记一条, 不拆分 attempts
+                              # 旧格式单条 performance_result 仍接受 (= 一条记录)
+          - regime: <string>          # 收益所属 regime, 须与 metadata.test_data.regimes / final_state.regimes 的 name 一致;
+                                      # 子环节计时 (measurement_kind=component_probe) 可用自定标签 (如 "resize_substage")
+            measurement_kind: <enum>  # incremental / isolated / in_process_paired / component_probe
+                                      #   incremental: 在本轮已采纳优化点的叠加栈 + 该 regime 上测的增量 A/B
+                                      #     ——链上增量, 可按 regime 加和, 贡献率/归因只统计此类
+                                      #   isolated: 独立双臂 A/B (不入归因——与其他叠加不具加和性)
+                                      #   in_process_paired: 进程内交替配对 (不入归因)
+                                      #   component_probe: 子环节/微基准耗时, 非端到端 (仅作证据)
+            metric: <string>          # 测量口径说明(benchmark 脚本/次数/中位数等)
+            baseline_ref: <string, optional>
+              # before 的参照对象,如 "raw model (无优化)" / "上一轮优化后" / "L0 基线"
+            before_ms: <float>  # 同口径 before, 毫秒数值(单位固定 ms,非自由文本)
+            after_ms: <float>   # 同口径 after, 毫秒数值; accepted 的每条含数值记录须 **<= before_ms**
+                                 # (after > before = 性能回退, 校验直接打回);rejected 因精度
+                                 # 门禁先失败未获 A/B 时可省略
         failure_reason: <string, optional>  # 如果 rejected,为什么失败
 
   final_state:
@@ -99,13 +109,21 @@
     files_modified: <list[string], optional>
       # 本案例修改/新增的文件列表
       # 如: ["mace/modules/fast_contraction.py", "scripts/benchmark_full.py"]
-    end_to_end_before_ms: <float>  # 上一轮结束时的端到端(首轮 = 原始基线, 即 metadata.yaml
-                                     # baselines.performance_ms, 校验强制相等)——单位固定 ms;
-                                     # 多测试样本时取代表样本(canonical)的数值,
-                                     # 辅样本数值留在 benchmark 原始输出与 test_data.characteristics
-    end_to_end_after_ms: <float>   # 本轮各优化点全部合并后的端到端效果, 单位固定 ms, 同上取代表样本
+    end_to_end_before_ms: <float>  # 主流 regime 的端到端(上一轮结束时的值; 首轮 = 原始基线,
+                                     # 即 metadata.yaml baselines.performance_ms, 校验强制相等)
+                                     # ——单位固定 ms; 与 regimes 表中 role=mainstream 行强校验相等
+    end_to_end_after_ms: <float>   # 本轮各优化点全部合并后的主流 regime 端到端, 单位固定 ms
+    regimes: <list, optional>      # 全 regime 终态表 (v2, 推荐填写)——辅 regime 的成果呈现
+                                     # 与跨轮链式校验的锚点; 不填时报告仅呈现主流单维
+      - name: <string>             # regime 名, 与 metadata.test_data.regimes 的命名一致 (见 metadata.md)
+        role: mainstream | auxiliary  # 恰好一个 mainstream (与顶层 end_to_end_* 对齐)
+        before_ms: <float>        # 上一轮同名 regime 的 after; 首轮 = 该 regime 基线
+                                     # (与 metadata.baselines.performance_regimes 同名条目强校验相等)
+        after_ms: <float>         # 本轮该 regime 终态
+        note: <string, optional>  # 语义标注 (如 "缓存命中稳态; 新输入首算 ~7ms"), 防止数字被误读
     # 轮级加速比由脚本派生: 轮内增量 = before/after; 累计 = 基线/当轮 after, 两种口径在报告并列;
-    # 各优化点的贡献率以总收益(基线 - 末轮 after)为分母计算。
+    # 各优化点贡献率按 regime 分账: 仅统计 (accepted ∧ measurement_kind=incremental ∧ regime 一致)
+    # 的记录, 分母为该 regime 的总收益(基线 - 末轮 after)。
     # 终局不标记——最后一个 round 文件即终点
     remaining_bottleneck: <string, optional>  # 优化后暴露的新瓶颈
 
@@ -209,6 +227,7 @@
 7. **链路闭合**: `analysis_path[].from_signals` 与 `optimization.attempts[].from_analysis` 必填,且只能引用本案例内存在的 id——现象→分析→手段全链路在案例内可回溯,不依赖工作目录中间产物(candidates.md / solutions.md / signals.jsonl 不随案例库留存)。分析线 `conclusion` 须自含,不写 "RC1" 这类只在中间产物中有定义的代号。
 8. **成本全程记录**: 根因分析(profiling+源码)、方案得出与落实、额外工程调试的成本(token + 时间)分阶段记于 `costs`,各优化点成本记于 `attempts[].costs`,总汇于 `costs.total`。
 9. **环境元信息单点维护**: 模型/环境/基线信息只在 `evidence_db/metadata.yaml`(准备阶段生成,模板见 [metadata.md](metadata.md))记录一次,全轮共用,案例文件不重复记录。
+10. **收益按 regime 分账**: 每条性能记录标注 `regime` 与 `measurement_kind`; 归因/贡献率只对 (accepted ∧ incremental ∧ regime 一致) 的记录计算, 分母为该 regime 自己的总收益——跨 regime 的数字互不做分母, "batch 的收益除以主流的总收益"这类混算在汇总层被结构性排除。一个优化点同时改善多个 regime 时, 在 `performance_results` 里各记一条, 不拆分 attempts。
 
 ## 目录结构
 

@@ -6,6 +6,12 @@
 只检查内容合法性 (结构/枚举/格式/链路) 与信息覆盖度 (必填字段齐全)。
 非规范一律打回, 不做容错适配。
 
+v2 (2026-11): 性能记录列表化 performance_results[] (每条带 regime + measurement_kind
+口径标签, 旧单条 performance_result 仍接受) + attempt 层 verdict;
+final_state.regimes 全 regime 终态表 (主流行与顶层强校验相等, 跨轮按 regime 链式衔接);
+metadata v2: test_data.regimes 场景清单 / baselines.performance_regimes 各 regime 基线
+(与 round_1 regimes.before 强校验相等) / accuracy mapping 形式 (golden/method 必填)。
+
   - 结构: YAML 可解析、无重复 key、无残留占位符、顶层为案例映射 (每文件一个案例)
   - 命名: 文件名 = round_<N>.yaml; id = <模型名称>-round_<N>-<日期YYYYMMDD>; 轮数与文件名一致
   - 必填字段: phenomenon.signals[] (id/source/content, 只记被分析线引用者) /
@@ -57,19 +63,26 @@ EXCLUDED_FILES = {"metadata.yaml", "splitting.yaml", "summary.md", "summary.json
 SIGNAL_KEYS = {"id", "source", "content"}
 PATH_KEYS = {"id", "from_signals", "steps", "conclusion"}
 ATT_KEYS = {"description", "from_analysis", "dimension", "implementation_detail",
-            "costs", "equivalence_verification", "performance_result", "failure_reason"}
+            "costs", "equivalence_verification", "performance_result",
+            "performance_results", "verdict", "failure_reason"}
 PERF_KEYS = {"metric", "baseline_ref", "before_ms", "after_ms", "verdict"}
+PERF_RECORD_KEYS = PERF_KEYS | {"regime", "measurement_kind"}  # v2: 记录可带 regime/口径标签
+MEASUREMENT_KINDS = {"incremental", "isolated", "in_process_paired", "component_probe"}
+REGIME_KEYS = {"name", "role", "before_ms", "after_ms", "note"}
+REGIME_ROLES = {"mainstream", "auxiliary"}
 COST_KEYS = ("input_cost", "output_cost", "time_hours")
 COST_SECTIONS = ("analysis", "optimization", "debugging", "system")
 FS_KEYS = {"adopted", "files_modified", "end_to_end_before_ms", "end_to_end_after_ms",
-           "remaining_bottleneck"}
+           "regimes", "remaining_bottleneck"}
 RC_KEYS = {"description", "bottleneck_type", "evidence"}
 EQ_KEYS = {"method", "metrics", "result"}
 METRIC_KEYS = {"metric", "threshold", "value"}
-META_FIELDS = (("model", ("name", "domain", "architecture", "params")),
-               ("test_data", ("characteristics", "input_spec")),
-               ("baselines", ("performance", "performance_ms", "accuracy")),
-               ("environment", ("hardware", "software_stack")))
+# metadata v2: (节, 必填字段, 可选字段)
+META_FIELDS = (("model", ("name", "domain", "architecture", "params"), ()),
+               ("test_data", ("characteristics", "input_spec"), ("regimes",)),
+               ("baselines", ("performance", "performance_ms", "accuracy"), ("performance_regimes",)),
+               ("environment", ("hardware", "software_stack"), ()))
+META_ACC_KEYS = {"golden", "method", "coverage", "result"}  # accuracy 的 mapping 形式
 
 
 class DuplicateKeyError(Exception):
@@ -142,6 +155,38 @@ def attempts_of(case):
     opt = case.get("optimization")
     atts = opt.get("attempts") if isinstance(opt, dict) else None
     return atts if isinstance(atts, list) else []
+
+
+def perf_records_of(att):
+    """attempt 的性能记录列表: performance_results (v2 列表) / performance_result (旧单条)。
+    两者同时存在返回 None (二选一, 由调用方报错)。"""
+    if "performance_results" in att and "performance_result" in att:
+        return None
+    prs = att.get("performance_results")
+    if isinstance(prs, list):
+        return [r for r in prs if isinstance(r, dict)]
+    pr = att.get("performance_result")
+    return [pr] if isinstance(pr, dict) else []
+
+
+def attempt_verdict_of(att, records):
+    """attempt 判定: attempt 层 verdict 优先, 其次记录内 verdict (取首个)。"""
+    v = att.get("verdict")
+    if v is not None:
+        return str(v)
+    for r in records:
+        if r.get("verdict") is not None:
+            return str(r.get("verdict"))
+    return None
+
+
+def regime_names_of(case):
+    fs = case.get("final_state")
+    regs = fs.get("regimes") if isinstance(fs, dict) else None
+    if not isinstance(regs, list):
+        return set()
+    return {str(r.get("name")) for r in regs
+            if isinstance(r, dict) and nonempty(r.get("name"))}
 
 
 def validate_signals(cf, case):
@@ -336,31 +381,62 @@ def validate_optimization(cf, case, path_ids):
                         else:
                             check_closed_keys(cf, m, METRIC_KEYS,
                                               "%s.equivalence_verification.metrics[%d]" % (p, j))
-        perf = att.get("performance_result")
-        if not isinstance(perf, dict):
-            cf.err("%s.performance_result 缺失" % p)
-        else:
-            check_closed_keys(cf, perf, PERF_KEYS, "%s.performance_result" % p)
-            req(cf, perf, "metric", "%s.performance_result.metric" % p)
-            bms = perf.get("before_ms")
-            if not is_number(bms):
-                cf.err("%s.performance_result.before_ms 缺失或非数值 "
-                       "(执行过的优化点必须有量化 A/B; 前置排除项不进 attempts)" % p)
-            ams = perf.get("after_ms")
-            verdict = perf.get("verdict")
-            if verdict is not None and str(verdict) not in VERDICTS:
-                cf.err("%s.performance_result.verdict '%s' 不在枚举 "
-                       "accepted/rejected/partial 内 (细节写入 result/failure_reason)"
-                       % (p, verdict))
-            if verdict == "accepted":
-                if not is_number(ams):
-                    cf.err("%s.performance_result.after_ms 缺失或非数值 "
-                           "(accepted 必填量化 A/B)" % p)
-                elif is_number(bms) and ams > bms:
+        records = perf_records_of(att)
+        if records is None:
+            cf.err("%s.performance_result 与 performance_results 只能二选一" % p)
+            records = []
+        if not records:
+            cf.err("%s 缺少性能记录 (performance_results 列表或旧格式 performance_result; "
+                   "执行过的优化点必须有量化 A/B, 前置排除项不进 attempts)" % p)
+
+        is_list = "performance_results" in att
+        regime_names = regime_names_of(case)
+        for j, rec in enumerate(records):
+            rp = "%s.performance_results[%d]" % (p, j) if is_list else "%s.performance_result" % p
+            check_closed_keys(cf, rec, PERF_RECORD_KEYS, rp)
+            req(cf, rec, "metric", rp + ".metric")
+            mk = rec.get("measurement_kind")
+            if mk is not None and str(mk) not in MEASUREMENT_KINDS:
+                cf.err("%s.measurement_kind '%s' 不在枚举内 "
+                       "(incremental/isolated/in_process_paired/component_probe)" % (rp, mk))
+            rg = rec.get("regime")
+            if rg is not None and str(mk) != "component_probe" and regime_names \
+                    and str(rg) not in regime_names:
+                cf.err("%s.regime '%s' 不在 final_state.regimes 名称集合内 %s "
+                       "(子环节计时须标 measurement_kind=component_probe)"
+                       % (rp, rg, sorted(regime_names)))
+            if not is_number(rec.get("before_ms")):
+                cf.err("%s.before_ms 缺失或非数值 "
+                       "(执行过的优化点必须有量化 A/B; 前置排除项不进 attempts)" % rp)
+
+        # 判定解析: attempt 层 verdict (v2) 优先; 记录内 verdict 须一致
+        v_att = att.get("verdict")
+        v_recs = [str(r.get("verdict")) for r in records if r.get("verdict") is not None]
+        verdict = None
+        if v_att is not None:
+            verdict = str(v_att)
+            if v_recs and set(v_recs) != {verdict}:
+                cf.err("%s.verdict(%s) 与记录内 verdict(%s) 不一致" % (p, verdict, sorted(set(v_recs))))
+        elif v_recs:
+            if len(set(v_recs)) != 1:
+                cf.err("%s 各性能记录 verdict 不一致(%s)——判定统一写在 attempt 层 verdict 字段"
+                       % (p, sorted(set(v_recs))))
+            else:
+                verdict = v_recs[0]
+        if verdict is not None and verdict not in VERDICTS:
+            cf.err("%s verdict '%s' 不在枚举 accepted/rejected/partial 内 "
+                   "(细节写入 result/failure_reason)" % (p, verdict))
+        if verdict == "accepted":
+            if not any(is_number(r.get("after_ms")) for r in records):
+                cf.err("%s accepted 但无任何记录含数值 after_ms (accepted 必填量化 A/B)" % p)
+            for j, rec in enumerate(records):
+                bms, ams = rec.get("before_ms"), rec.get("after_ms")
+                if is_number(bms) and is_number(ams) and ams > bms:
+                    rp = "%s.performance_results[%d]" % (p, j) if is_list else "%s.performance_result" % p
                     cf.err("%s accepted 但 after_ms(%s) > before_ms(%s)——性能回退应记 "
-                           "rejected + failure_reason" % (p, ams, bms))
-            if verdict == "rejected" and not nonempty(att.get("failure_reason")):
-                cf.err("%s verdict=rejected 但缺 failure_reason (失败必记)" % p)
+                           "rejected + failure_reason" % (rp, ams, bms))
+        if verdict == "rejected" and not nonempty(att.get("failure_reason")):
+            cf.err("%s verdict=rejected 但缺 failure_reason (失败必记)" % p)
 
 
 def validate_final_state(cf, case):
@@ -377,9 +453,49 @@ def validate_final_state(cf, case):
         if not is_number(fs.get(f)):
             cf.err("final_state.%s 缺失或非数值 (float, 单位固定 ms)" % f)
 
+    # v2: 全 regime 终态表
+    regs = fs.get("regimes")
+    if regs is not None:
+        if not isinstance(regs, list) or not regs:
+            cf.err("final_state.regimes 应为非空列表")
+            regs = None
+        if regs:
+            names, mainstream = [], 0
+            for i, rg in enumerate(regs):
+                rp = "final_state.regimes[%d]" % i
+                if not isinstance(rg, dict):
+                    cf.err("%s 不是映射" % rp)
+                    continue
+                check_closed_keys(cf, rg, REGIME_KEYS, rp)
+                rname = req(cf, rg, "name", rp + ".name")
+                role = rg.get("role")
+                if role is not None and str(role) not in REGIME_ROLES:
+                    cf.err("%s.role '%s' 不在枚举 mainstream/auxiliary 内" % (rp, role))
+                if str(role) == "mainstream":
+                    mainstream += 1
+                for f in ("before_ms", "after_ms"):
+                    if not is_number(rg.get(f)):
+                        cf.err("%s.%s 缺失或非数值 (float, 单位固定 ms)" % (rp, f))
+                if rname is not None:
+                    if str(rname) in names:
+                        cf.err("%s.name '%s' 与其他 regime 重复" % (rp, rname))
+                    names.append(str(rname))
+            if mainstream != 1:
+                cf.err("final_state.regimes 须恰好一个 role=mainstream (实际 %d 个)" % mainstream)
+            if mainstream == 1:
+                main = next(rg for rg in regs
+                            if isinstance(rg, dict) and str(rg.get("role")) == "mainstream")
+                for top, rk in (("end_to_end_before_ms", "before_ms"),
+                                ("end_to_end_after_ms", "after_ms")):
+                    tv, rv = fs.get(top), main.get(rk)
+                    if is_number(tv) and is_number(rv) and abs(float(tv) - float(rv)) > 1e-9:
+                        cf.err("final_state.regimes 主流行 %s=%s 与顶层 %s=%s 不一致"
+                               % (rk, rv, top, tv))
+
 
 def check_metadata(dir_path):
-    """校验 evidence_db 目录下的 metadata.yaml (准备阶段生成, 全轮共用)。"""
+    """校验 evidence_db 目录下的 metadata.yaml (准备阶段生成, 全轮共用)。
+    v2: 可选 test_data.regimes / baselines.performance_regimes / accuracy mapping。"""
     cf = CaseFile(dir_path / "metadata.yaml")
     fp = dir_path / "metadata.yaml"
     if not fp.is_file():
@@ -396,16 +512,82 @@ def check_metadata(dir_path):
     if not isinstance(data, dict):
         cf.err("metadata.yaml 顶层应为映射")
         return cf
-    check_closed_keys(cf, data, {s for s, _ in META_FIELDS}, "metadata.yaml")
-    for section, fields in META_FIELDS:
+    check_closed_keys(cf, data, {s for s, _, _ in META_FIELDS}, "metadata.yaml")
+    for section, required, optional in META_FIELDS:
         block = data.get(section)
         if not isinstance(block, dict):
             cf.err("metadata.yaml 缺少 '%s' 节" % section)
             continue
-        check_closed_keys(cf, block, set(fields), "metadata.yaml.%s" % section)
-        for f in fields:
+        check_closed_keys(cf, block, set(required) | set(optional), "metadata.yaml.%s" % section)
+        for f in required:
             if not nonempty(block.get(f)):
                 cf.err("metadata.yaml %s.%s 缺失或为空" % (section, f))
+
+    # ---- v2: test_data.regimes (场景清单) ----
+    regime_names, mainstream_name = [], None
+    regs = (data.get("test_data") or {}).get("regimes") if isinstance(data.get("test_data"), dict) else None
+    if regs is not None:
+        if not isinstance(regs, list) or not regs:
+            cf.err("metadata.test_data.regimes 应为非空列表")
+        else:
+            n_main = 0
+            for i, rg in enumerate(regs):
+                p = "metadata.test_data.regimes[%d]" % i
+                if not isinstance(rg, dict):
+                    cf.err("%s 不是映射" % p)
+                    continue
+                check_closed_keys(cf, rg, {"name", "workload", "role"}, p)
+                rname = req(cf, rg, "name", p + ".name")
+                req(cf, rg, "workload", p + ".workload")
+                role = rg.get("role")
+                if role is not None and str(role) not in REGIME_ROLES:
+                    cf.err("%s.role '%s' 不在枚举 mainstream/auxiliary 内" % (p, role))
+                if str(role) == "mainstream":
+                    n_main += 1
+                    mainstream_name = str(rname) if rname is not None else mainstream_name
+                if rname is not None:
+                    if str(rname) in regime_names:
+                        cf.err("%s.name '%s' 与其他 regime 重复" % (p, rname))
+                    regime_names.append(str(rname))
+            if n_main != 1:
+                cf.err("metadata.test_data.regimes 须恰好一个 role=mainstream (实际 %d 个)"
+                       % n_main)
+
+    # ---- v2: baselines.performance_regimes (各 regime 基线) ----
+    pr = (data.get("baselines") or {}).get("performance_regimes") \
+        if isinstance(data.get("baselines"), dict) else None
+    if pr is not None:
+        if not isinstance(pr, list) or not pr:
+            cf.err("metadata.baselines.performance_regimes 应为非空列表")
+        else:
+            if not regime_names:
+                cf.err("metadata.baselines.performance_regimes 须伴随 test_data.regimes 清单")
+            for i, e in enumerate(pr):
+                p = "metadata.baselines.performance_regimes[%d]" % i
+                if not isinstance(e, dict):
+                    cf.err("%s 不是映射" % p)
+                    continue
+                check_closed_keys(cf, e, {"name", "baseline_ms"}, p)
+                ename = req(cf, e, "name", p + ".name")
+                if not is_number(e.get("baseline_ms")):
+                    cf.err("%s.baseline_ms 缺失或非数值 (float, 单位固定 ms)" % p)
+                if ename is not None and regime_names and str(ename) not in regime_names:
+                    cf.err("%s.name '%s' 不在 test_data.regimes 清单内 %s"
+                           % (p, ename, regime_names))
+                if mainstream_name is not None and ename is not None \
+                        and str(ename) == mainstream_name and is_number(e.get("baseline_ms")):
+                    pm = (data.get("baselines") or {}).get("performance_ms")
+                    if is_number(pm) and abs(float(pm) - float(e.get("baseline_ms"))) > 1e-9:
+                        cf.err("metadata performance_regimes 主流基线(%s) 与 performance_ms(%s) "
+                               "不一致" % (e.get("baseline_ms"), pm))
+
+    # ---- v2: accuracy 接受 mapping 形式 (golden/method 必填) 或旧字符串 ----
+    acc = (data.get("baselines") or {}).get("accuracy") \
+        if isinstance(data.get("baselines"), dict) else None
+    if isinstance(acc, dict):
+        check_closed_keys(cf, acc, META_ACC_KEYS, "metadata.baselines.accuracy")
+        req(cf, acc, "golden", "metadata.baselines.accuracy.golden")
+        req(cf, acc, "method", "metadata.baselines.accuracy.method")
     return cf
 
 
@@ -574,25 +756,68 @@ def cross_round_checks(db_dir, round_cases, meta_data):
                 cf.err("round_%d end_to_end_before_ms(%g) 与 round_%d 终态 "
                        "after_ms(%g) 不衔接——链式口径要求本轮 before = 上一轮 after"
                        % (cur[0], cur_before, prev[0], prev_after))
+
+    # v2: 逐 regime 链式衔接 (round_N 的 regime X before = round_{N-1} 的 after;
+    # 上一轮没有该 regime 视为首次出现, 不校验)
+    prev_regimes = {}
+    for n, d in round_cases:
+        regs = (d.get("final_state") or {}).get("regimes")
+        cur_regimes = {}
+        if isinstance(regs, list):
+            for rg in regs:
+                if not (isinstance(rg, dict) and nonempty(rg.get("name"))):
+                    continue
+                name = str(rg.get("name"))
+                if is_number(rg.get("after_ms")):
+                    cur_regimes[name] = float(rg.get("after_ms"))
+                if name in prev_regimes and is_number(rg.get("before_ms")):
+                    tol = max(0.05, abs(prev_regimes[name]) * 0.001)
+                    if abs(prev_regimes[name] - float(rg.get("before_ms"))) > tol:
+                        cf.err("round_%d regimes['%s'].before_ms(%g) 与上一轮 "
+                               "after_ms(%g) 不衔接——regime 链式口径要求本轮 before = 上轮 after"
+                               % (n, name, float(rg.get("before_ms")), prev_regimes[name]))
+        prev_regimes = cur_regimes
+
+    # v2: 首轮各 regime before 与 metadata performance_regimes 逐条对齐 (辅 regime 基线锚点)
+    if isinstance(meta_data, dict) and round_cases:
+        pr = (meta_data.get("baselines") or {}).get("performance_regimes")
+        if isinstance(pr, list):
+            first_regs = (round_cases[0][1].get("final_state") or {}).get("regimes") or []
+            for e in pr:
+                if not (isinstance(e, dict) and nonempty(e.get("name"))):
+                    continue
+                name = str(e.get("name"))
+                for rg in first_regs:
+                    if isinstance(rg, dict) and str(rg.get("name")) == name:
+                        if is_number(rg.get("before_ms")) and is_number(e.get("baseline_ms")):
+                            tol = max(0.05, abs(float(e.get("baseline_ms"))) * 0.001)
+                            if abs(float(rg.get("before_ms")) - float(e.get("baseline_ms"))) > tol:
+                                cf.err("round_1 regimes['%s'].before_ms(%g) 与 metadata "
+                                       "performance_regimes 基线(%g) 不符——首轮 before 必须等于该 "
+                                       "regime 的原始基线" % (name, float(rg.get("before_ms")),
+                                                              float(e.get("baseline_ms"))))
+                        break
+
     for n, d in round_cases:
         seen = {}
         for att in attempts_of(d):
             if not isinstance(att, dict):
                 continue
-            perf = att.get("performance_result") or {}
-            if perf.get("verdict") != "accepted":
+            records = perf_records_of(att) or []
+            if attempt_verdict_of(att, records) != "accepted":
                 continue
-            bms, ams = perf.get("before_ms"), perf.get("after_ms")
-            if not (is_number(bms) and is_number(ams)):
-                continue
-            key = (float(bms), float(ams))
-            desc = str(att.get("description"))[:30]
-            if key in seen:
-                cf.err("round_%d '%s' 与 '%s' 的 (before_ms, after_ms) 完全相同——"
-                       "重复计账嫌疑, 须分开测量各自单独 A/B 或合并为一条"
-                       % (n, seen[key], desc))
-            else:
-                seen[key] = desc
+            for rec in records:
+                bms, ams = rec.get("before_ms"), rec.get("after_ms")
+                if not (is_number(bms) and is_number(ams)):
+                    continue
+                key = (float(bms), float(ams))
+                desc = str(att.get("description"))[:30]
+                if key in seen:
+                    cf.err("round_%d '%s' 与 '%s' 的 (before_ms, after_ms) 完全相同——"
+                           "重复计账嫌疑, 须分开测量各自单独 A/B 或合并为一条"
+                           % (n, seen[key], desc))
+                else:
+                    seen[key] = desc
     return cf
 
 
