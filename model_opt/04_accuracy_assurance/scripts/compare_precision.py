@@ -20,7 +20,9 @@
   logits:     JS(softmax 后) + Top-1 一致率（门禁）＋ max_abs / P99 相对误差 / Top-k（辅助）
   embedding:  cosine（门禁）+ 范数相对误差
   dense:      MAE / RMSE + max_abs + P99 相对误差（门禁 rel_p99）
-  generated:  同 dense（固定随机条件下的张量门禁；SSIM/LPIPS 经 custom_metric 补充）
+  generated:  同 dense（固定随机条件下比**最终输出**张量，如解码后图像；SSIM/LPIPS 经
+              custom_metric 补充。多步迭代模型的中间态如去噪 latents 不得作为门禁比对对象
+              ——迭代误差放大使其阈值变相成为 bit-exact，仅作诊断）
   structured: custom_metric 任务指标（IoU / RMSD 等）；缺省退化为 dense 度量
 
 注意：baseline 含零元素时 rel_p99 会被放大，此时用 --max-abs 门禁（声明即生效）。

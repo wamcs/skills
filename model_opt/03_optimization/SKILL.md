@@ -5,6 +5,12 @@ description: 优化实施：用去重/复用/掩盖/替换四维度框架实施�
 
 # NPU 优化实施
 
+## 进入条件（★A 文件校验，先于一切实施动作）
+
+1. `validate_analysis.py --full analysis/round_{N}` **退出码 0**，校验器输出原文（含退出码）记入本阶段工作记录——**禁止以"自查/自认为完整"替代校验器运行**
+2. `solutions.md` 覆盖 candidates.md §1 全部候选 id（校验器机检），无方案项附解释
+3. **GATE 未过时禁止修改任何模型/运行代码**——发现产物缺失应回到 Phase 2 补做，而不是边补边实施
+
 ## 运行前统一原则：NPU 资源检查
 
 **每次需要运行代码（benchmark / profiling / 精度验证 / 功能测试等）之前，必须先用 `npu-smi info` 检查 NPU 上是否有与本任务无关的进程。若存在，先确认这些进程与当前任务无关（必要时向用户确认归属），再清理进程、释放显存，确认资源干净后才开始运行。**
@@ -44,7 +50,7 @@ subagent 零上下文启动，prompt 必须注入：
 
 1. **任务与返回条件**：方案内容、对应问题点、验证要求（Level 1 精度 + A/B benchmark）。返回条件只有三种——已实施（附验证结果）/ 已放弃（附「方向放弃标准（分级）」对应级别完整证据）/ 已回退（附原因），不允许浅尝辄止：框架实现失败须再尝试自定义实现（Level 2+ 强制），单次失败须先归因再决定下一步
 2. **必读文件**：按方案类型给路径、要求实施前先读——替换维度 → [npu_operator_catalog.yaml](references/npu_operator_catalog.yaml)；等价替换类方案 → [equivalence_verification.md](references/equivalence_verification.md)；图编译 → [compilation_tools.md](references/compilation_tools.md)；任何方案 → [npu_checklist.md](references/npu_checklist.md)；四维度手段 → 对应维度 reference
-3. **死路清单**：evidence_db `platform_findings` 中前提仍成立的条目 + 本 session 已确认失败的路径（各附失败原因与成立前提）。清单内路径禁止重试，唯一例外是任务前提已实质变化（图结构 / 环境变量 / dtype / 版本），重验须说明前提差异
+3. **死路清单**：本 session 已确认失败的路径（各附失败原因与成立前提）。清单内路径禁止重试，唯一例外是任务前提已实质变化（图结构 / 环境变量 / dtype / 版本），重验须说明前提差异
 
 方案内的多轮尝试（换实现 / 调参数 / 换 dtype / 换输入顺序）在 subagent 独立上下文中穷尽，不挤占主线。相互独立的方案并行 spawn，有依赖的（方案 B 依赖 A 的产物）按依赖顺序。
 

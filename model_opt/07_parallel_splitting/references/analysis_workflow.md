@@ -124,7 +124,7 @@ Q2: 超限的是持久状态还是激活？
 - **判定病因不可切分** → 单卡内存工程立项（Phase 3，见 03_optimization「内存工程」），本轨道的切分仅服务速度/吞吐目标（若存在），或退出并行轨道
 - **重估否决本身**：否决依据是理论估算（未实测 α/带宽）时，先跑 `comm_self_test.py --timing` 校准再下结论——通信量级判断错一个数量级，结论就反转
 
-产出：**张量分布约定表**——逐张量声明分布方式、每卡 shape、消费操作、恢复通信。须覆盖所有大张量及其配套张量（mask/index/position_ids 等，配套漏切是实测高频错误），未声明张量视为潜在 bug。此阶段为工作产物，在 context 中随估算演进；格式与 evidence_db `parallel_splitting.tensor_distribution_table` 字段一致，★ 方案确认通过后落盘冻结，验证通过后随切分案例入库。
+产出：**张量分布约定表**——逐张量声明分布方式、每卡 shape、消费操作、恢复通信。须覆盖所有大张量及其配套张量（mask/index/position_ids 等，配套漏切是实测高频错误），未声明张量视为潜在 bug。此阶段为工作产物，随估算演进；格式与 evidence_db `parallel_splitting.tensor_distribution_table` 字段一致，★ 方案确认通过后落盘冻结，验证通过后随切分案例入库。
 
 ---
 ## 第三步：通信代价与可行性

@@ -5,6 +5,13 @@ description: 工程化实践：目录规划、版本管理、文档维护。当�
 
 # NPU 适配工程化实践
 
+## 提交前置（顺序执行，输出原文记入提交说明，禁止自查替代）
+
+1. `validate_analysis.py --full analysis/round_{N}` 退出码 0
+2. `validate_evidence.py <工作目录>/evidence_db` 退出码 0
+3. `generate_summary.py <工作目录>/evidence_db` 已运行（summary.md/summary.json 随本轮更新并暂存）
+4. 任一失败 → 停止提交，修复产物后重检；**禁止带病提交**
+
 ## 工程目录规划
 
 - 目录结构遵循标准项目目录结构（[standardized_operations.md](../references/standardized_operations.md)——Phase 0 初始化，含 `analysis/` 轮次目录），本节不另设口径
@@ -34,7 +41,7 @@ main 分支（稳定版本，不直接修改）
 - **提交前必须完成以下步骤**（缺一不可）：
   1. 全量精度验证通过（Level 2，与原始 baseline 对比）
   2. Profiling 确认有收益（重新采集，对比优化前后数据）
-  3. evidence_db 案例已按 [schema](../06_evidence_db/schema.md) 记录到项目工作目录的 `evidence_db/` 下
+  3. evidence_db 已记录并通过文件校验
   4. 用户确认提交（展示总结 + evidence_db 路径，等待用户同意）
 - 每批优化一个 commit，不要多批合并
 - 实验性尝试前确认有干净的回退点（以当前工作分支 HEAD 为基点）

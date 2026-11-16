@@ -5,6 +5,18 @@ description: 瓶颈分析：profiling 数据分析 + 源码结构分析双线定
 
 # NPU 瓶颈分析
 
+## 进入条件（不满足则停下补做，禁止进入分析）
+
+1. **round ≥ 2 时，上一轮产物已过校验**：`validate_analysis.py --full analysis/round_{N-1}` 退出码 0
+2. **round ≥ 2 时，本轮 L1 必须新鲜**：本轮 profiling 目录的时间戳晚于 round_{N-1} 相关文件的最后一次 git commit（禁止消费上轮 profiling 数据下结论）
+
+## 轮次开局协议（round ≥ 2 强制，防"沿用上轮结论"）
+
+1. **重置采集**：L1 必须本轮重新采集（上轮 L0 仅作交叉验证参照）
+2. **上轮候选处置表**：上轮 candidates.md §1 逐条标注 `复验通过` / `条件失效`（附新画像数据）/ `已实施`（附收益数据）——处置表放入本轮 candidates.md §3
+3. **新信号要求**：本轮 §1 至少含 1 个上轮不存在的信号 id，但不得虚构优化点强行续轮
+4. **遗留项表达规范**：上轮遗留候选只能写成**可证伪的重验条件**（"若新画像显示 X 仍 > Y ms，则…"）放入处置表，禁止写成排期（"round N+1 处理"）
+
 ## 运行前统一原则：NPU 资源检查
 
 **每次需要运行代码（benchmark / profiling / 精度验证 / 功能测试等）之前，必须先用 `npu-smi info` 检查 NPU 上是否有与本任务无关的进程。若存在，先确认这些进程与当前任务无关（必要时向用户确认归属），再清理进程、释放显存，确认资源干净后才开始运行。** 无关进程会争抢算力/显存，导致性能数据失真或 OOM。
@@ -34,7 +46,7 @@ Phase 2 的分析由两条线驱动,完全解耦、可并行:
    - **Line B subagent**：跑 `run_analysis.py --output analysis/round_{N}/line_b_report.md`，按 [profiling_to_action.md](references/profiling_to_action.md) 方法论对全部 DEFINITE/WARNING 信号做根因追踪，返回追踪记录
    - **Line A subagent**：穿透框架 → 按三层记录事实 → 对照判据推导疑点（详见 [proactive_source_analysis.md](references/proactive_source_analysis.md)），填写 findings.yaml 并跑 `line_a_report.py` 落盘报告
    - subagent 的独立上下文让每条线都能做深（Line B 逐算子下钻、Line A 通读源码）而不挤占主线；spawn 时须在 prompt 中给出对应方法论文档路径、L1 目录与产物要求
-3. **合并分析**（主线执行，需要两份报告的完整信息，不宜下放）(结合两份报告做整合,非简单拼接):以位置/算子为键**关联**两线发现 → **合成**完整候选(结构根因 + 量化影响) → **去重**双来源发现 → **补盲**(Line B 信号无结构支撑走桥梁追踪或定向回补 Line A;Line A 疑点无现象判冷路径排除或标 profiling 盲区) → 产出 `analysis/round_{N}/candidates.md` → 进入 Phase 3 方案设计。合并动作与 candidates.md 结构详见 [merge_analysis.md](references/merge_analysis.md)
+3. **合并分析**（主线执行，需要两份报告的完整信息，不宜下放）(结合两份报告做整合,非简单拼接):以位置/算子为键**关联**两线发现 → **合成**完整候选(结构根因 + 量化影响) → **去重**双来源发现 → **补盲**(Line B 信号无结构支撑走桥梁追踪或定向回补 Line A;Line A 疑点无现象判冷路径排除或标 profiling 盲区) → 产出 `analysis/round_{N}/candidates.md` → 进入 Phase 3 方案设计。结构与合并动作的**唯一权威定义**见 [merge_analysis.md](references/merge_analysis.md)
 
 **关键约束**:
 - Line B 和 Line A **都必须执行**,不设跳过条件——Line B 覆盖可见瓶颈,Line A 覆盖 profiling 盲区
